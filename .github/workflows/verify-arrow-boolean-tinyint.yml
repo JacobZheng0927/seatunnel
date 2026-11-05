@@ -1,0 +1,88 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Arrow TINYINT real StarRocks E2E
+
+on:
+  push:
+    branches: [zsh/verify-arrow-boolean-tinyint]
+
+permissions:
+  contents: read
+
+jobs:
+  starrocks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUN_ENGINES: zeta
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Build and verify unit regression
+        shell: bash
+        run: |
+          rc=0
+          ./mvnw -B -pl :connector-starrocks-e2e -am -DskipTests -Dskip.ui=true -Pci install > /tmp/build.log 2>&1 || rc=$?
+          tail -n 25 /tmp/build.log
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          ./mvnw -B -pl :connector-common test > /tmp/unit.log 2>&1 || rc=$?
+          tail -n 20 /tmp/unit.log
+          exit "$rc"
+      - name: Compare real StarRocks E2E before and after the fix
+        shell: bash
+        run: |
+          reader=seatunnel-connectors-v2/connector-common/src/main/java/org/apache/seatunnel/connectors/seatunnel/common/source/arrow/reader/ArrowToSeatunnelRowReader.java
+          cp "$reader" /tmp/fixed-reader.java
+          trap 'cp /tmp/fixed-reader.java "$reader"' EXIT
+          git show HEAD~2:"$reader" > "$reader"
+          rc=0
+          ./mvnw -B -pl :connector-starrocks-e2e -am -DskipTests -Dskip.ui=true -Pci package > /tmp/before-package.log 2>&1 || rc=$?
+          tail -n 20 /tmp/before-package.log
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          before_rc=0
+          ./mvnw -B -pl :connector-starrocks-e2e -DskipUT=true -DskipIT=false -Dit.test=StarRocksIT#testStarRocksBooleanAsTinyInt verify > /tmp/before-e2e.log 2>&1 || before_rc=$?
+          tail -n 25 /tmp/before-e2e.log
+          echo "Before-fix exit code: $before_rc"
+          python3 -c 'from pathlib import Path; s=Path("/tmp/before-e2e.log").read_text(errors="replace"); print("Before-fix Boolean-to-Byte failure:", "java.lang.Boolean cannot be cast to class java.lang.Byte" in s)'
+          cp /tmp/fixed-reader.java "$reader"
+          ./mvnw -B -pl :connector-starrocks-e2e -am -DskipTests -Dskip.ui=true -Pci package > /tmp/after-package.log 2>&1 || rc=$?
+          tail -n 20 /tmp/after-package.log
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          ./mvnw -B -pl :connector-starrocks-e2e -DskipUT=true -DskipIT=false -Dit.test=StarRocksIT#testStarRocksBooleanAsTinyInt verify > /tmp/after-e2e.log 2>&1 || rc=$?
+          tail -n 30 /tmp/after-e2e.log
+          exit "$rc"
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arrow-tinyint-validation-logs
+          path: |
+            /tmp/build.log
+            /tmp/unit.log
+            /tmp/before-package.log
+            /tmp/before-e2e.log
+            /tmp/after-package.log
+            /tmp/after-e2e.log
+            seatunnel-e2e/seatunnel-connector-v2-e2e/connector-starrocks-e2e/target/failsafe-reports
